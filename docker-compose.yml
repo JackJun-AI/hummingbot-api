@@ -20,7 +20,7 @@ services:
     container_name: hummingbot-api
     image: hummingbot/hummingbot-api:latest
     ports:
-      - "8000:8000"
+      - "8010:8000"
     volumes:
       - ./bots:/hummingbot-api/bots
       - /var/run/docker.sock:/var/run/docker.sock
