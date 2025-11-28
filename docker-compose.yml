@@ -99,6 +99,7 @@ services:
 networks:
   emqx-bridge:
     driver: bridge
+    name: hummingbot-network  # 设置网络名称，供其他 docker-compose 使用
 
 volumes:
   emqx-data: { }

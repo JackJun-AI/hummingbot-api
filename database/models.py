@@ -349,3 +349,99 @@ class GatewayCLMMEvent(Base):
     position = relationship("GatewayCLMMPosition", back_populates="events")
 
 
+# ============================================================================
+# Backtesting Tables
+# ============================================================================
+
+class BacktestRun(Base):
+    __tablename__ = "backtest_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # Backtest identification
+    run_id = Column(String, unique=True, nullable=False, index=True)  # UUID
+    run_name = Column(String, nullable=False)  # User-defined name
+
+    # Configuration
+    controller_name = Column(String, nullable=False, index=True)  # ai_agent_v1, bollinger_v1, etc.
+    config_data = Column(Text, nullable=False)  # JSON configuration
+
+    # Time parameters
+    start_time = Column(Integer, nullable=False)  # Backtest start timestamp (epoch seconds)
+    end_time = Column(Integer, nullable=False)    # Backtest end timestamp
+    backtesting_resolution = Column(String, default="5m")  # 1m, 5m, 15m, 1h
+    trade_cost = Column(Numeric(precision=10, scale=6), default=0.001)  # Trading cost (0.1%)
+
+    # Status tracking
+    status = Column(String, nullable=False, default="PENDING", index=True)
+    # PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
+
+    # Timestamps
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False, index=True)
+    started_at = Column(TIMESTAMP(timezone=True), nullable=True, index=True)
+    completed_at = Column(TIMESTAMP(timezone=True), nullable=True, index=True)
+
+    # Results summary (populated after completion)
+    total_trades = Column(Integer, default=0)
+    win_rate = Column(Numeric(precision=10, scale=6), nullable=True)
+    net_pnl_quote = Column(Numeric(precision=30, scale=18), nullable=True)
+    net_pnl_pct = Column(Numeric(precision=10, scale=6), nullable=True)
+    max_drawdown = Column(Numeric(precision=30, scale=18), nullable=True)
+    sharpe_ratio = Column(Numeric(precision=10, scale=4), nullable=True)
+
+    # Error tracking
+    error_message = Column(Text, nullable=True)
+
+    # Relationships
+    logs = relationship("BacktestLog", back_populates="backtest_run", cascade="all, delete-orphan")
+    trades = relationship("BacktestTrade", back_populates="backtest_run", cascade="all, delete-orphan")
+
+
+class BacktestLog(Base):
+    __tablename__ = "backtest_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    backtest_run_id = Column(Integer, ForeignKey("backtest_runs.id"), nullable=False, index=True)
+
+    timestamp = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False, index=True)
+    log_level = Column(String, nullable=False, index=True)  # DEBUG, INFO, WARNING, ERROR
+    log_message = Column(Text, nullable=False)
+
+    # Optional: categorize logs for easier filtering
+    log_category = Column(String, nullable=True, index=True)  # INITIALIZATION, AI_DECISION, TRADE_EXECUTION, ERROR
+
+    backtest_run = relationship("BacktestRun", back_populates="logs")
+
+
+class BacktestTrade(Base):
+    __tablename__ = "backtest_trades"
+
+    id = Column(Integer, primary_key=True, index=True)
+    backtest_run_id = Column(Integer, ForeignKey("backtest_runs.id"), nullable=False, index=True)
+
+    # Trade information (extracted from ExecutorInfo)
+    executor_id = Column(String, nullable=False, index=True)
+    trading_pair = Column(String, nullable=False, index=True)
+    side = Column(String, nullable=False)  # BUY, SELL
+
+    # Timestamps
+    entry_timestamp = Column(Integer, nullable=False, index=True)
+    exit_timestamp = Column(Integer, nullable=True, index=True)
+
+    # Prices and amounts
+    entry_price = Column(Numeric(precision=30, scale=18), nullable=False)
+    exit_price = Column(Numeric(precision=30, scale=18), nullable=True)
+    amount = Column(Numeric(precision=30, scale=18), nullable=False)
+
+    # PnL
+    net_pnl_quote = Column(Numeric(precision=30, scale=18), nullable=False)
+    net_pnl_pct = Column(Numeric(precision=10, scale=6), nullable=False)
+    cum_fees_quote = Column(Numeric(precision=30, scale=18), nullable=False)
+
+    # Close information
+    close_type = Column(String, nullable=True)  # TAKE_PROFIT, STOP_LOSS, TIME_LIMIT, TRAILING_STOP
+    status = Column(String, nullable=False, default="ACTIVE")  # ACTIVE, CLOSED
+
+    backtest_run = relationship("BacktestRun", back_populates="trades")
+
+
