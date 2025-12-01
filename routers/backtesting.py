@@ -1,11 +1,12 @@
 import json
+import math
 import os
 import signal
 import subprocess
 import sys
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any, Dict
 
 import psutil
 from fastapi import APIRouter, HTTPException, Query
@@ -31,6 +32,49 @@ backtesting_engine = BacktestingEngineBase()
 
 # Store process PIDs for running backtests
 _running_processes = {}
+
+
+def sanitize_float_value(value: Any, default: float = 0.0) -> Any:
+    """
+    Replace inf, -inf, and nan float values with a default value.
+    
+    Args:
+        value: The value to sanitize
+        default: The default value to use for inf/-inf/nan (default: 0.0)
+        
+    Returns:
+        Sanitized value
+    """
+    if isinstance(value, float):
+        if math.isinf(value) or math.isnan(value):
+            return default
+    return value
+
+
+def sanitize_dict(data: Dict[str, Any], default: float = 0.0) -> Dict[str, Any]:
+    """
+    Recursively sanitize all float values in a dictionary.
+    
+    Args:
+        data: Dictionary to sanitize
+        default: The default value to use for inf/-inf/nan (default: 0.0)
+        
+    Returns:
+        Sanitized dictionary
+    """
+    sanitized = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            sanitized[key] = sanitize_dict(value, default)
+        elif isinstance(value, list):
+            sanitized[key] = [
+                sanitize_dict(item, default) if isinstance(item, dict) 
+                else sanitize_float_value(item, default)
+                for item in value
+            ]
+        else:
+            sanitized[key] = sanitize_float_value(value, default)
+    return sanitized
 
 
 @router.post("/run-backtesting")
@@ -64,15 +108,25 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
             controller_config=controller_config, trade_cost=backtesting_config.trade_cost,
             start=int(backtesting_config.start_time), end=int(backtesting_config.end_time),
             backtesting_resolution=backtesting_config.backtesting_resolution)
+        
+        # Process data and replace NaN with 0
         processed_data = backtesting_results["processed_data"]["features"].fillna(0)
+        processed_data_dict = processed_data.to_dict()
+        
+        # Sanitize executors to remove inf/-inf/nan values
         executors_info = [e.to_dict() for e in backtesting_results["executors"]]
-        backtesting_results["processed_data"] = processed_data.to_dict()
-        results = backtesting_results["results"]
-        results["sharpe_ratio"] = results["sharpe_ratio"] if results["sharpe_ratio"] is not None else 0
+        executors_info = [sanitize_dict(executor) for executor in executors_info]
+        
+        # Sanitize results to remove inf/-inf/nan values
+        results = sanitize_dict(backtesting_results["results"])
+        
+        # Sanitize processed data to remove any remaining inf/-inf/nan values
+        processed_data_dict = sanitize_dict(processed_data_dict)
+        
         return {
             "executors": executors_info,
-            "processed_data": backtesting_results["processed_data"],
-            "results": backtesting_results["results"],
+            "processed_data": processed_data_dict,
+            "results": results,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -176,7 +230,7 @@ async def get_backtest_status(run_id: str):
             if not backtest_run:
                 raise HTTPException(status_code=404, detail=f"Backtest run {run_id} not found")
             
-            # Convert to response model
+            # Convert to response model with sanitized float values
             return BacktestStatusResponse(
                 run_id=backtest_run.run_id,
                 run_name=backtest_run.run_name,
@@ -185,17 +239,17 @@ async def get_backtest_status(run_id: str):
                 start_time=backtest_run.start_time,
                 end_time=backtest_run.end_time,
                 backtesting_resolution=backtest_run.backtesting_resolution,
-                trade_cost=float(backtest_run.trade_cost),
+                trade_cost=sanitize_float_value(float(backtest_run.trade_cost)),
                 created_at=backtest_run.created_at.isoformat(),
                 started_at=backtest_run.started_at.isoformat() if backtest_run.started_at else None,
                 completed_at=backtest_run.completed_at.isoformat() if backtest_run.completed_at else None,
                 error_message=backtest_run.error_message,
                 total_trades=backtest_run.total_trades,
-                win_rate=float(backtest_run.win_rate) if backtest_run.win_rate else None,
-                net_pnl_quote=float(backtest_run.net_pnl_quote) if backtest_run.net_pnl_quote else None,
-                net_pnl_pct=float(backtest_run.net_pnl_pct) if backtest_run.net_pnl_pct else None,
-                max_drawdown=float(backtest_run.max_drawdown) if backtest_run.max_drawdown else None,
-                sharpe_ratio=float(backtest_run.sharpe_ratio) if backtest_run.sharpe_ratio else None
+                win_rate=sanitize_float_value(float(backtest_run.win_rate)) if backtest_run.win_rate is not None else None,
+                net_pnl_quote=sanitize_float_value(float(backtest_run.net_pnl_quote)) if backtest_run.net_pnl_quote is not None else None,
+                net_pnl_pct=sanitize_float_value(float(backtest_run.net_pnl_pct)) if backtest_run.net_pnl_pct is not None else None,
+                max_drawdown=sanitize_float_value(float(backtest_run.max_drawdown)) if backtest_run.max_drawdown is not None else None,
+                sharpe_ratio=sanitize_float_value(float(backtest_run.sharpe_ratio)) if backtest_run.sharpe_ratio is not None else None
             )
     
     except HTTPException:
@@ -226,7 +280,7 @@ async def get_backtest_results(
             if not backtest_run:
                 raise HTTPException(status_code=404, detail=f"Backtest run {run_id} not found")
             
-            # Get trades
+            # Get trades and sanitize float values
             trades = await repo.get_trades(run_id)
             trade_entries = [
                 BacktestTradeEntry(
@@ -235,12 +289,12 @@ async def get_backtest_results(
                     side=trade.side,
                     entry_timestamp=trade.entry_timestamp,
                     exit_timestamp=trade.exit_timestamp,
-                    entry_price=float(trade.entry_price),
-                    exit_price=float(trade.exit_price) if trade.exit_price else None,
-                    amount=float(trade.amount),
-                    net_pnl_quote=float(trade.net_pnl_quote),
-                    net_pnl_pct=float(trade.net_pnl_pct),
-                    cum_fees_quote=float(trade.cum_fees_quote),
+                    entry_price=sanitize_float_value(float(trade.entry_price)),
+                    exit_price=sanitize_float_value(float(trade.exit_price)) if trade.exit_price is not None else None,
+                    amount=sanitize_float_value(float(trade.amount)),
+                    net_pnl_quote=sanitize_float_value(float(trade.net_pnl_quote)),
+                    net_pnl_pct=sanitize_float_value(float(trade.net_pnl_pct)),
+                    cum_fees_quote=sanitize_float_value(float(trade.cum_fees_quote)),
                     close_type=trade.close_type,
                     status=trade.status
                 )
@@ -261,7 +315,7 @@ async def get_backtest_results(
                     for log in logs
                 ]
             
-            # Build response
+            # Build response with sanitized float values
             run_info = BacktestStatusResponse(
                 run_id=backtest_run.run_id,
                 run_name=backtest_run.run_name,
@@ -270,17 +324,17 @@ async def get_backtest_results(
                 start_time=backtest_run.start_time,
                 end_time=backtest_run.end_time,
                 backtesting_resolution=backtest_run.backtesting_resolution,
-                trade_cost=float(backtest_run.trade_cost),
+                trade_cost=sanitize_float_value(float(backtest_run.trade_cost)),
                 created_at=backtest_run.created_at.isoformat(),
                 started_at=backtest_run.started_at.isoformat() if backtest_run.started_at else None,
                 completed_at=backtest_run.completed_at.isoformat() if backtest_run.completed_at else None,
                 error_message=backtest_run.error_message,
                 total_trades=backtest_run.total_trades,
-                win_rate=float(backtest_run.win_rate) if backtest_run.win_rate else None,
-                net_pnl_quote=float(backtest_run.net_pnl_quote) if backtest_run.net_pnl_quote else None,
-                net_pnl_pct=float(backtest_run.net_pnl_pct) if backtest_run.net_pnl_pct else None,
-                max_drawdown=float(backtest_run.max_drawdown) if backtest_run.max_drawdown else None,
-                sharpe_ratio=float(backtest_run.sharpe_ratio) if backtest_run.sharpe_ratio else None
+                win_rate=sanitize_float_value(float(backtest_run.win_rate)) if backtest_run.win_rate is not None else None,
+                net_pnl_quote=sanitize_float_value(float(backtest_run.net_pnl_quote)) if backtest_run.net_pnl_quote is not None else None,
+                net_pnl_pct=sanitize_float_value(float(backtest_run.net_pnl_pct)) if backtest_run.net_pnl_pct is not None else None,
+                max_drawdown=sanitize_float_value(float(backtest_run.max_drawdown)) if backtest_run.max_drawdown is not None else None,
+                sharpe_ratio=sanitize_float_value(float(backtest_run.sharpe_ratio)) if backtest_run.sharpe_ratio is not None else None
             )
             
             return BacktestResultsResponse(
@@ -358,17 +412,17 @@ async def list_backtests(
                     start_time=run.start_time,
                     end_time=run.end_time,
                     backtesting_resolution=run.backtesting_resolution,
-                    trade_cost=float(run.trade_cost),
+                    trade_cost=sanitize_float_value(float(run.trade_cost)),
                     created_at=run.created_at.isoformat(),
                     started_at=run.started_at.isoformat() if run.started_at else None,
                     completed_at=run.completed_at.isoformat() if run.completed_at else None,
                     error_message=run.error_message,
                     total_trades=run.total_trades,
-                    win_rate=float(run.win_rate) if run.win_rate else None,
-                    net_pnl_quote=float(run.net_pnl_quote) if run.net_pnl_quote else None,
-                    net_pnl_pct=float(run.net_pnl_pct) if run.net_pnl_pct else None,
-                    max_drawdown=float(run.max_drawdown) if run.max_drawdown else None,
-                    sharpe_ratio=float(run.sharpe_ratio) if run.sharpe_ratio else None
+                    win_rate=sanitize_float_value(float(run.win_rate)) if run.win_rate is not None else None,
+                    net_pnl_quote=sanitize_float_value(float(run.net_pnl_quote)) if run.net_pnl_quote is not None else None,
+                    net_pnl_pct=sanitize_float_value(float(run.net_pnl_pct)) if run.net_pnl_pct is not None else None,
+                    max_drawdown=sanitize_float_value(float(run.max_drawdown)) if run.max_drawdown is not None else None,
+                    sharpe_ratio=sanitize_float_value(float(run.sharpe_ratio)) if run.sharpe_ratio is not None else None
                 )
                 for run in runs
             ]
