@@ -193,33 +193,14 @@ async def run_backtest_task(run_id: str, request: BacktestStartRequest):
                 }]
             )
         
-        # Run backtesting in a thread pool to avoid blocking the event loop
-        # 🔑 关键修复：使用 run_in_executor 在线程池中运行同步代码
-        # 这样可以避免阻塞 FastAPI 的事件循环，其他请求可以正常处理
-        import asyncio
-        loop = asyncio.get_event_loop()
-        
-        async with db_manager.get_session_context() as session:
-            repo = BacktestRunRepository(session)
-            await repo.bulk_create_logs(
-                run_id=run_id,
-                logs=[{
-                    "log_level": "INFO",
-                    "log_message": "Starting backtesting simulation in thread pool...",
-                    "log_category": "INITIALIZATION"
-                }]
-            )
-        
-        # 在线程池中运行回测（避免阻塞事件循环）
-        backtesting_results = await loop.run_in_executor(
-            None,  # 使用默认的 ThreadPoolExecutor
-            lambda: asyncio.run(backtesting_engine.run_backtesting(
-                controller_config=controller_config,
-                trade_cost=request.trade_cost,
-                start=int(request.start_time),
-                end=int(request.end_time),
-                backtesting_resolution=request.backtesting_resolution
-            ))
+        # Run backtesting (this is the same as sync version)
+        # Controller 会通过 contextvars 获取 run_id 并实时记录日志
+        backtesting_results = await backtesting_engine.run_backtesting(
+            controller_config=controller_config,
+            trade_cost=request.trade_cost,
+            start=int(request.start_time),
+            end=int(request.end_time),
+            backtesting_resolution=request.backtesting_resolution
         )
         
         # Log completion
