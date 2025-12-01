@@ -1,14 +1,13 @@
+import asyncio
 import json
 import math
 import os
-import signal
-import subprocess
-import sys
 import uuid
+from contextvars import ContextVar
 from datetime import datetime
 from typing import Optional, Any, Dict
+from decimal import Decimal
 
-import psutil
 from fastapi import APIRouter, HTTPException, Query
 
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory
@@ -30,8 +29,12 @@ router = APIRouter(tags=["Backtesting"], prefix="/backtesting")
 candles_factory = CandlesFactory()
 backtesting_engine = BacktestingEngineBase()
 
-# Store process PIDs for running backtests
-_running_processes = {}
+# Store running backtest tasks
+_running_tasks = {}
+
+# 🔑 使用 contextvars 实现异步任务隔离的上下文（支持多任务并发）
+backtest_run_id_var: ContextVar[Optional[str]] = ContextVar('backtest_run_id', default=None)
+backtest_db_url_var: ContextVar[Optional[str]] = ContextVar('backtest_db_url', default=None)
 
 
 def sanitize_float_value(value: Any, default: float = 0.0) -> Any:
@@ -136,10 +139,172 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
 # NEW: Async Backtesting Endpoints
 # ============================================================================
 
+async def run_backtest_task(run_id: str, request: BacktestStartRequest):
+    """
+    Background task to run the backtest.
+    This runs in the same process as the API, but asynchronously.
+    """
+    # 🔑 设置当前任务的上下文变量（线程安全，支持多任务并发）
+    backtest_run_id_var.set(run_id)
+    backtest_db_url_var.set(settings.database.url)
+    
+    db_manager = AsyncDatabaseManager(settings.database.url)
+    
+    try:
+        # Update status to RUNNING
+        async with db_manager.get_session_context() as session:
+            repo = BacktestRunRepository(session)
+            await repo.update_status(
+                run_id=run_id,
+                status="RUNNING",
+                started_at=datetime.now()
+            )
+            await repo.bulk_create_logs(
+                run_id=run_id,
+                logs=[{
+                    "log_level": "INFO",
+                    "log_message": "Backtest started",
+                    "log_category": "INITIALIZATION"
+                }]
+            )
+        
+        # Get controller config (similar to sync version)
+        if isinstance(request.config, str):
+            controller_config = backtesting_engine.get_controller_config_instance_from_yml(
+                config_path=request.config,
+                controllers_conf_dir_path=settings.app.controllers_path,
+                controllers_module=settings.app.controllers_module
+            )
+        else:
+            controller_config = backtesting_engine.get_controller_config_instance_from_dict(
+                config_data=request.config,
+                controllers_module=settings.app.controllers_module
+            )
+        
+        # Log configuration loaded
+        async with db_manager.get_session_context() as session:
+            repo = BacktestRunRepository(session)
+            await repo.bulk_create_logs(
+                run_id=run_id,
+                logs=[{
+                    "log_level": "INFO",
+                    "log_message": f"Controller config loaded: {controller_config.controller_name}",
+                    "log_category": "INITIALIZATION"
+                }]
+            )
+        
+        # Run backtesting (this is the same as sync version)
+        # Controller 会通过 contextvars 获取 run_id 并实时记录日志
+        backtesting_results = await backtesting_engine.run_backtesting(
+            controller_config=controller_config,
+            trade_cost=request.trade_cost,
+            start=int(request.start_time),
+            end=int(request.end_time),
+            backtesting_resolution=request.backtesting_resolution
+        )
+        
+        # Log completion
+        async with db_manager.get_session_context() as session:
+            repo = BacktestRunRepository(session)
+            await repo.bulk_create_logs(
+                run_id=run_id,
+                logs=[{
+                    "log_level": "INFO",
+                    "log_message": "Backtesting simulation completed",
+                    "log_category": "COMPLETED"
+                }]
+            )
+        
+        # Store trades
+        async with db_manager.get_session_context() as session:
+            repo = BacktestRunRepository(session)
+            executors = backtesting_results["executors"]
+            
+            for executor in executors:
+                await repo.create_trade(run_id, executor.to_dict())
+            
+            await repo.bulk_create_logs(
+                run_id=run_id,
+                logs=[{
+                    "log_level": "INFO",
+                    "log_message": f"Stored {len(executors)} trades",
+                    "log_category": "COMPLETED"
+                }]
+            )
+        
+        # Update final results
+        async with db_manager.get_session_context() as session:
+            repo = BacktestRunRepository(session)
+            results = backtesting_results["results"]
+            results["sharpe_ratio"] = results["sharpe_ratio"] if results["sharpe_ratio"] is not None else 0
+            
+            await repo.update_results(
+                run_id=run_id,
+                results=results,
+                total_trades=len(executors),
+                status="COMPLETED",
+                completed_at=datetime.now()
+            )
+            
+            await repo.bulk_create_logs(
+                run_id=run_id,
+                logs=[{
+                    "log_level": "INFO",
+                    "log_message": f"Backtest completed. Net PnL: {results.get('net_pnl', 0):.4%}",
+                    "log_category": "COMPLETED"
+                }]
+            )
+        
+    except asyncio.CancelledError:
+        # Task was cancelled by user
+        async with db_manager.get_session_context() as session:
+            repo = BacktestRunRepository(session)
+            await repo.update_status(
+                run_id=run_id,
+                status="CANCELLED",
+                completed_at=datetime.now()
+            )
+            await repo.bulk_create_logs(
+                run_id=run_id,
+                logs=[{
+                    "log_level": "INFO",
+                    "log_message": "Backtest cancelled by user",
+                    "log_category": "COMPLETED"
+                }]
+            )
+        raise
+        
+    except Exception as e:
+        # Log error
+        async with db_manager.get_session_context() as session:
+            repo = BacktestRunRepository(session)
+            await repo.update_status(
+                run_id=run_id,
+                status="FAILED",
+                error_message=str(e),
+                completed_at=datetime.now()
+            )
+            await repo.bulk_create_logs(
+                run_id=run_id,
+                logs=[{
+                    "log_level": "ERROR",
+                    "log_message": f"Backtest failed: {str(e)}",
+                    "log_category": "ERROR"
+                }]
+            )
+        raise
+        
+    finally:
+        await db_manager.close()
+        # Remove from running tasks
+        if run_id in _running_tasks:
+            del _running_tasks[run_id]
+
+
 @router.post("/start", response_model=dict)
 async def start_backtest(request: BacktestStartRequest):
     """
-    Start a new backtest run in a separate process.
+    Start a new backtest run in the background.
     
     Returns the run_id to track progress.
     """
@@ -178,30 +343,9 @@ async def start_backtest(request: BacktestStartRequest):
                 status="PENDING"
             )
         
-        # Prepare config for subprocess
-        process_config = {
-            "controller_name": controller_name,
-            "config_data": request.config if isinstance(request.config, str) else request.config,
-            "start_time": request.start_time,
-            "end_time": request.end_time,
-            "backtesting_resolution": request.backtesting_resolution,
-            "trade_cost": request.trade_cost
-        }
-        
-        # Start backtest in separate process
-        runner_path = os.path.join(os.path.dirname(__file__), "..", "services", "backtest_runner.py")
-        process = subprocess.Popen(
-            [sys.executable, runner_path, run_id, json.dumps(process_config)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={**os.environ, "DATABASE_URL": settings.database.url}
-        )
-        
-        # Store process information
-        _running_processes[run_id] = {
-            "pid": process.pid,
-            "process": process
-        }
+        # Create background task to run the backtest
+        task = asyncio.create_task(run_backtest_task(run_id, request))
+        _running_tasks[run_id] = task
         
         return {
             "run_id": run_id,
@@ -355,31 +499,30 @@ async def get_backtest_results(
 @router.post("/stop/{run_id}")
 async def stop_backtest(run_id: str):
     """
-    Stop a running backtest by sending SIGTERM to the process.
+    Stop a running backtest by cancelling the task.
     """
-    if run_id not in _running_processes:
-        raise HTTPException(status_code=404, detail=f"No running process found for run_id: {run_id}")
+    if run_id not in _running_tasks:
+        raise HTTPException(status_code=404, detail=f"No running backtest found for run_id: {run_id}")
     
     try:
-        process_info = _running_processes[run_id]
-        pid = process_info["pid"]
+        task = _running_tasks[run_id]
         
-        # Check if process is still running
-        if psutil.pid_exists(pid):
-            # Send SIGTERM for graceful shutdown
-            os.kill(pid, signal.SIGTERM)
+        # Check if task is still running
+        if not task.done():
+            # Cancel the task
+            task.cancel()
             
             return {
                 "run_id": run_id,
-                "message": f"Stop signal sent to process {pid}",
+                "message": f"Stop signal sent to backtest {run_id}",
                 "status": "STOPPING"
             }
         else:
-            # Process already finished
-            del _running_processes[run_id]
+            # Task already finished
+            del _running_tasks[run_id]
             return {
                 "run_id": run_id,
-                "message": "Process already finished",
+                "message": "Backtest already finished",
                 "status": "FINISHED"
             }
     

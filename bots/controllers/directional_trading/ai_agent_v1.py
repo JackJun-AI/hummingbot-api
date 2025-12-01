@@ -1,6 +1,8 @@
 import asyncio
 import json
+import os
 import time
+from contextvars import ContextVar
 from decimal import Decimal
 from typing import Dict, List, Optional
 
@@ -20,6 +22,18 @@ from hummingbot.strategy_v2.controllers.directional_trading_controller_base impo
 )
 from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction, StopExecutorAction
+
+
+# 🔑 全局 contextvars（与 backtesting.py 中定义的保持一致）
+# 这些变量在每个异步任务中独立，不会互相干扰
+try:
+    from contextvars import ContextVar
+    backtest_run_id_var: ContextVar[Optional[str]] = ContextVar('backtest_run_id', default=None)
+    backtest_db_url_var: ContextVar[Optional[str]] = ContextVar('backtest_db_url', default=None)
+except ImportError:
+    # 如果导入失败（不太可能），使用 None
+    backtest_run_id_var = None
+    backtest_db_url_var = None
 
 
 class AIAgentV1Config(DirectionalTradingControllerConfigBase):
@@ -191,10 +205,27 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         self._historical_funding_rates: Dict[str, pd.DataFrame] = {}
         self._funding_rate_initialized = False
         
+        # 🔑 从 contextvars 获取回测上下文（线程安全，支持多任务并发）
+        self._backtest_run_id = None
+        self._backtest_db_url = None
+        self._decision_cycle_count = 0  # 决策轮次计数
+        
+        # 尝试从 contextvars 获取回测信息
+        if backtest_run_id_var is not None:
+            try:
+                self._backtest_run_id = backtest_run_id_var.get()
+                self._backtest_db_url = backtest_db_url_var.get()
+            except LookupError:
+                # contextvars 未设置（实盘模式）
+                pass
+        
         # 初始化 LangChain LLM
         self._init_langchain_llm()
         
         self.logger().info(f"AI Agent V1 initialized - monitoring {len(config.trading_pairs)} pairs")
+        
+        if self._backtest_run_id:
+            self.logger().info(f"🔬 Backtest mode detected - Run ID: {self._backtest_run_id}")
     
     def _init_langchain_llm(self):
         """初始化 LangChain LLM"""
@@ -1521,6 +1552,9 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
         执行完整的 AI 决策流程（异步版本）
         """
         try:
+            # 增加决策轮次计数
+            self._decision_cycle_count += 1
+            
             # Step 1: 构建上下文
             self.logger().info("📊 Building trading context...")
             context = await self._build_trading_context()
@@ -1529,21 +1563,177 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
                 f"{len(context['positions'])} positions"
             )
             
-            # Step 2: 调用 LLM
+            # Step 2: 构建 Prompts
+            self.logger().debug("Building prompts...")
+            system_prompt = self._build_system_prompt()
+            user_prompt = self._build_user_prompt(context)
+            
+            # 🔑 Step 2.5: 如果在回测环境，记录决策开始日志
+            if self._backtest_run_id:
+                await self._log_decision_start(context, system_prompt, user_prompt)
+            
+            # Step 3: 调用 LLM
             self.logger().info("🧠 Calling LLM for decisions...")
             decisions = await self._get_ai_decisions(context)
             self.logger().info(f"   ✅ LLM returned {len(decisions)} decisions")
             
-            # Step 3: 验证决策
+            # Step 4: 验证决策
             self.logger().debug("Validating decisions...")
             validated = self._validate_decisions(decisions, context)
             self.logger().info(f"   ✅ Validated {len(validated)}/{len(decisions)} decisions")
+            
+            # 🔑 Step 5: 如果在回测环境，记录决策结果日志
+            if self._backtest_run_id:
+                await self._log_decision_result(context, system_prompt, user_prompt, validated)
             
             return validated
             
         except Exception as e:
             self.logger().error(f"❌ Decision cycle failed: {e}", exc_info=True)
+            
+            # 🔑 记录错误到回测日志
+            if self._backtest_run_id:
+                await self._log_decision_error(str(e))
+            
             return []
+    
+    async def _log_decision_start(self, context: Dict, system_prompt: str, user_prompt: str):
+        """记录决策开始的日志（仅回测环境）"""
+        try:
+            # 导入必要的模块
+            from database import AsyncDatabaseManager, BacktestRunRepository
+            
+            db_manager = AsyncDatabaseManager(self._backtest_db_url)
+            
+            async with db_manager.get_session_context() as session:
+                repo = BacktestRunRepository(session)
+                
+                # 构建简要信息
+                account = context.get('account', {})
+                positions = context.get('positions', [])
+                
+                log_message = (
+                    f"🔄 AI Decision Cycle #{self._decision_cycle_count} Started\n\n"
+                    f"💰 Account: ${account.get('current_holdings', 0):.2f} "
+                    f"(PnL: ${account.get('total_pnl', 0):.2f}, "
+                    f"Closed: ${account.get('closed_pnl', 0):.2f}, "
+                    f"Active: ${account.get('active_pnl', 0):.2f})\n"
+                    f"📊 Positions: {len(positions)}/{self.config.max_concurrent_positions}\n"
+                )
+                
+                for pos in positions:
+                    log_message += (
+                        f"  - {pos['symbol']} {pos['side']}: "
+                        f"Entry ${pos['entry_price']:.2f}, "
+                        f"PnL {pos['net_pnl_pct']*100:.2f}% (${pos['net_pnl_quote']:.2f})\n"
+                    )
+                
+                await repo.bulk_create_logs(
+                    run_id=self._backtest_run_id,
+                    logs=[{
+                        "log_level": "INFO",
+                        "log_message": log_message,
+                        "log_category": "AI_DECISION"
+                    }]
+                )
+            
+            await db_manager.close()
+            
+        except Exception as e:
+            self.logger().warning(f"Failed to log decision start: {e}")
+    
+    async def _log_decision_result(self, context: Dict, system_prompt: str, user_prompt: str, decisions: List[Dict]):
+        """记录决策结果到数据库（仅回测环境）"""
+        try:
+            from database import AsyncDatabaseManager, BacktestRunRepository
+            
+            db_manager = AsyncDatabaseManager(self._backtest_db_url)
+            
+            async with db_manager.get_session_context() as session:
+                repo = BacktestRunRepository(session)
+                
+                logs_to_create = []
+                
+                # 1. 记录决策摘要
+                log_message = f"✅ AI Decision Cycle #{self._decision_cycle_count} Completed\n\n"
+                
+                if decisions:
+                    log_message += f"🤖 Decisions ({len(decisions)}):\n"
+                    for i, dec in enumerate(decisions, 1):
+                        action = dec.get('action', 'unknown')
+                        symbol = dec.get('symbol', 'N/A')
+                        
+                        log_message += f"\n[{i}] Action: {action.upper()}"
+                        if symbol != 'N/A':
+                            log_message += f" on {symbol}"
+                        
+                        if action in ['open_long', 'open_short']:
+                            sl = dec.get('stop_loss_pct', 0) * 100
+                            tp = dec.get('take_profit_pct', 0) * 100
+                            conf = dec.get('confidence', 0)
+                            log_message += f"\n    SL: {sl:.1f}%, TP: {tp:.1f}%, Confidence: {conf}%"
+                        
+                        reasoning = dec.get('reasoning', 'No reasoning')
+                        reasoning_preview = reasoning[:200] + "..." if len(reasoning) > 200 else reasoning
+                        log_message += f"\n    Reasoning: {reasoning_preview}\n"
+                else:
+                    log_message += "🤖 Decisions: HOLD (no actions taken)\n"
+                
+                logs_to_create.append({
+                    "log_level": "INFO",
+                    "log_message": log_message,
+                    "log_category": "AI_DECISION"
+                })
+                
+                # 2. 记录 System Prompt（DEBUG 级别，方便分析）
+                logs_to_create.append({
+                    "log_level": "DEBUG",
+                    "log_message": f"📋 System Prompt (Cycle #{self._decision_cycle_count}):\n\n{system_prompt}",
+                    "log_category": "AI_PROMPT"
+                })
+                
+                # 3. 记录 User Prompt（DEBUG 级别）
+                logs_to_create.append({
+                    "log_level": "DEBUG",
+                    "log_message": f"📊 User Prompt (Cycle #{self._decision_cycle_count}):\n\n{user_prompt}",
+                    "log_category": "AI_PROMPT"
+                })
+                
+                # 批量写入
+                await repo.bulk_create_logs(
+                    run_id=self._backtest_run_id,
+                    logs=logs_to_create
+                )
+            
+            await db_manager.close()
+            self.logger().debug(f"✅ Logged decision cycle #{self._decision_cycle_count} to database")
+            
+        except Exception as e:
+            self.logger().warning(f"Failed to log decision result: {e}")
+    
+    async def _log_decision_error(self, error_message: str):
+        """记录决策错误（仅回测环境）"""
+        try:
+            from database import AsyncDatabaseManager, BacktestRunRepository
+            
+            db_manager = AsyncDatabaseManager(self._backtest_db_url)
+            
+            async with db_manager.get_session_context() as session:
+                repo = BacktestRunRepository(session)
+                
+                await repo.bulk_create_logs(
+                    run_id=self._backtest_run_id,
+                    logs=[{
+                        "log_level": "ERROR",
+                        "log_message": f"❌ AI Decision Cycle #{self._decision_cycle_count} Failed: {error_message}",
+                        "log_category": "ERROR"
+                    }]
+                )
+            
+            await db_manager.close()
+            
+        except Exception as e:
+            self.logger().warning(f"Failed to log decision error: {e}")
     
     def _create_open_action(self, decision: Dict, trade_type: TradeType) -> Optional[CreateExecutorAction]:
         """创建开仓 Action"""
