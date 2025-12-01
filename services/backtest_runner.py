@@ -49,7 +49,10 @@ class BacktestRunner:
         
         try:
             # Initialize database connection
-            db_url = os.getenv("DATABASE_URL", settings.database_url)
+            db_url = os.getenv("DATABASE_URL")
+            if not db_url:
+                from config import settings
+                db_url = settings.database.url
             db_manager = AsyncDatabaseManager(db_url)
             
             # Update status to RUNNING

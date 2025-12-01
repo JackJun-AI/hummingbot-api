@@ -143,7 +143,7 @@ async def start_backtest(request: BacktestStartRequest):
     
     Returns the run_id to track progress.
     """
-    db_manager = AsyncDatabaseManager(settings.database_url)
+    db_manager = AsyncDatabaseManager(settings.database.url)
     
     try:
         # Generate unique run ID
@@ -194,7 +194,7 @@ async def start_backtest(request: BacktestStartRequest):
             [sys.executable, runner_path, run_id, json.dumps(process_config)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env={**os.environ, "DATABASE_URL": settings.database_url}
+            env={**os.environ, "DATABASE_URL": settings.database.url}
         )
         
         # Store process information
@@ -220,7 +220,7 @@ async def get_backtest_status(run_id: str):
     """
     Get the current status of a backtest run.
     """
-    db_manager = AsyncDatabaseManager(settings.database_url)
+    db_manager = AsyncDatabaseManager(settings.database.url)
     
     try:
         async with db_manager.get_session_context() as session:
@@ -269,7 +269,7 @@ async def get_backtest_results(
     """
     Get complete results of a backtest run, including trades and logs.
     """
-    db_manager = AsyncDatabaseManager(settings.database_url)
+    db_manager = AsyncDatabaseManager(settings.database.url)
     
     try:
         async with db_manager.get_session_context() as session:
@@ -396,7 +396,7 @@ async def list_backtests(
     """
     List all backtest runs with pagination and filtering.
     """
-    db_manager = AsyncDatabaseManager(settings.database_url)
+    db_manager = AsyncDatabaseManager(settings.database.url)
     
     try:
         async with db_manager.get_session_context() as session:
