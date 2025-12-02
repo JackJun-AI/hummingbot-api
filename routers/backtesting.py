@@ -11,7 +11,8 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Query
 
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory
-# ✅ 使用增强版回测引擎，支持异步 determine_executor_actions
+from hummingbot.strategy_v2.backtesting.backtesting_engine_base import BacktestingEngineBase
+# ✅ 引入增强版回测引擎（用于异步 AI Agent）
 from services.backtesting_engine_async import BacktestingEngineAsync
 
 from config import settings
@@ -28,8 +29,13 @@ from models.backtesting import (
 
 router = APIRouter(tags=["Backtesting"], prefix="/backtesting")
 candles_factory = CandlesFactory()
-# ✅ 使用增强版回测引擎
-backtesting_engine = BacktestingEngineAsync()
+
+# 🔑 两个引擎实例：
+# 1. 原版引擎：用于同步 endpoint /run-backtesting（兼容旧 Controller）
+backtesting_engine = BacktestingEngineBase()
+
+# 2. 增强版引擎：用于异步 endpoints /backtesting/start（支持异步 AI Agent）
+backtesting_engine_async = BacktestingEngineAsync()
 
 # Store running backtest tasks
 _running_tasks = {}
@@ -172,13 +178,13 @@ async def run_backtest_task(run_id: str, request: BacktestStartRequest):
         
         # Get controller config (similar to sync version)
         if isinstance(request.config, str):
-            controller_config = backtesting_engine.get_controller_config_instance_from_yml(
+            controller_config = backtesting_engine_async.get_controller_config_instance_from_yml(
                 config_path=request.config,
                 controllers_conf_dir_path=settings.app.controllers_path,
                 controllers_module=settings.app.controllers_module
             )
         else:
-            controller_config = backtesting_engine.get_controller_config_instance_from_dict(
+            controller_config = backtesting_engine_async.get_controller_config_instance_from_dict(
                 config_data=request.config,
                 controllers_module=settings.app.controllers_module
             )
@@ -195,9 +201,9 @@ async def run_backtest_task(run_id: str, request: BacktestStartRequest):
                 }]
             )
         
-        # Run backtesting (this is the same as sync version)
+        # Run backtesting with ASYNC engine (支持异步 AI Agent)
         # Controller 会通过 contextvars 获取 run_id 并实时记录日志
-        backtesting_results = await backtesting_engine.run_backtesting(
+        backtesting_results = await backtesting_engine_async.run_backtesting(
             controller_config=controller_config,
             trade_cost=request.trade_cost,
             start=int(request.start_time),
@@ -314,8 +320,8 @@ async def start_backtest(request: BacktestStartRequest):
     
     try:
         # Generate unique run ID
-        run_id = str(uuid.uuid4())
-        
+    run_id = str(uuid.uuid4())
+    
         # Extract controller name from config
         if isinstance(request.config, str):
             # It's a YAML path, extract controller name from path
@@ -576,7 +582,7 @@ async def list_backtests(
                 runs=run_responses,
                 total=len(run_responses)
             )
-    
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list backtests: {str(e)}")
     finally:
