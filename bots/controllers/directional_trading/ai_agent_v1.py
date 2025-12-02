@@ -74,9 +74,18 @@ class AIAgentV1Config(DirectionalTradingControllerConfigBase):
     openrouter_api_key: str = Field(
         default="",
         json_schema_extra={
-            "prompt": "Enter OpenRouter API key: ",
+            "prompt": "Enter OpenRouter API key (leave empty to use OPENROUTER_API_KEY env var): ",
             "prompt_on_new": True,
             "is_secure": True
+        }
+    )
+    
+    custom_system_prompt: Optional[str] = Field(
+        default=None,
+        json_schema_extra={
+            "prompt": "Enter custom system prompt (leave empty for default): ",
+            "prompt_on_new": False,
+            "is_secure": False
         }
     )
     
@@ -234,10 +243,19 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
     def _init_langchain_llm(self):
         """初始化 LangChain LLM"""
         try:
+            # 从环境变量获取 API key（如果配置中没有提供）
+            api_key = self.config.openrouter_api_key
+            if not api_key:
+                api_key = os.environ.get("OPENROUTER_API_KEY", "")
+                if api_key:
+                    self.logger().info("Using OPENROUTER_API_KEY from environment variable")
+                else:
+                    self.logger().warning("No OpenRouter API key found in config or environment variable")
+            
             # 使用 LangChain 的 ChatOpenAI（兼容 OpenRouter）
             self.llm = ChatOpenAI(
                 model=self.config.llm_model,
-                openai_api_key=self.config.openrouter_api_key,
+                openai_api_key=api_key,
                 openai_api_base="https://openrouter.ai/api/v1",
                 temperature=float(self.config.llm_temperature),
                 max_tokens=self.config.llm_max_tokens,
@@ -830,35 +848,8 @@ Required fields for each decision:
 Analyze and respond with the JSON array only.
 """
     
-    def _build_system_prompt(self) -> str:
-        """构建系统 Prompt（可配置部分）"""
-        system_prompt = f"""You are an autonomous cryptocurrency trading agent with systematic, disciplined approach.
-
-# ROLE & MISSION
-Your mission: Maximize risk-adjusted returns through disciplined trading decisions based on technical analysis and risk management principles.
-
----
-
-# TRADING ENVIRONMENT
-
-## Your Trading Setup
-- **Exchange**: {self.config.connector_name}
-- **Available Pairs**: {', '.join(self.config.trading_pairs)}
-- **Max Concurrent Positions**: {self.config.max_concurrent_positions}
-- **Position Size**: {float(self.config.single_position_size_pct) * 100}% of capital per trade"""
-        
-        # 🔧 修复：stop_loss, take_profit, time_limit 可能为 None
-        if self.config.triple_barrier_config.stop_loss is not None:
-            system_prompt += f"\n- **Base Stop Loss**: {float(self.config.triple_barrier_config.stop_loss) * 100}%"
-        
-        if self.config.triple_barrier_config.take_profit is not None:
-            system_prompt += f"\n- **Base Take Profit**: {float(self.config.triple_barrier_config.take_profit) * 100}%"
-        
-        if self.config.triple_barrier_config.time_limit is not None:
-            system_prompt += f"\n- **Max Hold Time**: {self.config.triple_barrier_config.time_limit / 3600:.1f} hours"
-        
-        system_prompt += """
-
+    # 默认的 TRADING FRAMEWORK（可通过配置覆盖）
+    DEFAULT_TRADING_FRAMEWORK = """
 ## Market Type
 - **Perpetual Contracts**: No expiration, funding rate mechanism
 - **Funding Rate Impact**: Extreme rates (>0.01%) often signal overextension and potential reversal
@@ -943,6 +934,41 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
 - Your edge comes from waiting for high-probability setups, not from activity
 
 """
+    
+    def _build_system_prompt(self) -> str:
+        """构建系统 Prompt（可配置部分）"""
+        system_prompt = f"""You are an autonomous cryptocurrency trading agent with systematic, disciplined approach.
+
+# ROLE & MISSION
+Your mission: Maximize risk-adjusted returns through disciplined trading decisions based on technical analysis and risk management principles.
+
+---
+
+# TRADING ENVIRONMENT
+
+## Your Trading Setup
+- **Exchange**: {self.config.connector_name}
+- **Available Pairs**: {', '.join(self.config.trading_pairs)}
+- **Max Concurrent Positions**: {self.config.max_concurrent_positions}
+- **Position Size**: {float(self.config.single_position_size_pct) * 100}% of capital per trade"""
+        
+        # 🔧 修复：stop_loss, take_profit, time_limit 可能为 None
+        if self.config.triple_barrier_config.stop_loss is not None:
+            system_prompt += f"\n- **Base Stop Loss**: {float(self.config.triple_barrier_config.stop_loss) * 100}%"
+        
+        if self.config.triple_barrier_config.take_profit is not None:
+            system_prompt += f"\n- **Base Take Profit**: {float(self.config.triple_barrier_config.take_profit) * 100}%"
+        
+        if self.config.triple_barrier_config.time_limit is not None:
+            system_prompt += f"\n- **Max Hold Time**: {self.config.triple_barrier_config.time_limit / 3600:.1f} hours"
+        
+        system_prompt += "\n"
+        
+        # 🔑 使用自定义 system prompt 或默认值
+        if self.config.custom_system_prompt:
+            system_prompt += self.config.custom_system_prompt
+        else:
+            system_prompt += self.DEFAULT_TRADING_FRAMEWORK
         
         # 添加固定的 OUTPUT FORMAT
         return system_prompt + self.OUTPUT_FORMAT
@@ -1652,8 +1678,10 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
                             log_message += f"\n    SL: {sl:.1f}%, TP: {tp:.1f}%, Confidence: {conf}%"
                         
                         reasoning = dec.get('reasoning', 'No reasoning')
-                        reasoning_preview = reasoning[:200] + "..." if len(reasoning) > 200 else reasoning
-                        log_message += f"\n    Reasoning: {reasoning_preview}\n"
+                        # 如果 reasoning 是空字符串，使用默认值
+                        if not reasoning or (isinstance(reasoning, str) and not reasoning.strip()):
+                            reasoning = 'No reasoning provided'
+                        log_message += f"\n    Reasoning: {reasoning}\n"
                 else:
                     log_message += "🤖 Decisions: HOLD (no actions taken)\n"
                 
