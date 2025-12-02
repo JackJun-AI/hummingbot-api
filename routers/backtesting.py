@@ -11,12 +11,13 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Query
 
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory
-from hummingbot.strategy_v2.backtesting.backtesting_engine_base import BacktestingEngineBase
+# ✅ 使用增强版回测引擎，支持异步 determine_executor_actions
+from services.backtesting_engine_async import BacktestingEngineAsync
 
 from config import settings
 from database import AsyncDatabaseManager, BacktestRunRepository
 from models.backtesting import (
-    BacktestingConfig,
+    BacktestingConfig, 
     BacktestStartRequest,
     BacktestStatusResponse,
     BacktestResultsResponse,
@@ -27,7 +28,8 @@ from models.backtesting import (
 
 router = APIRouter(tags=["Backtesting"], prefix="/backtesting")
 candles_factory = CandlesFactory()
-backtesting_engine = BacktestingEngineBase()
+# ✅ 使用增强版回测引擎
+backtesting_engine = BacktestingEngineAsync()
 
 # Store running backtest tasks
 _running_tasks = {}
@@ -346,12 +348,12 @@ async def start_backtest(request: BacktestStartRequest):
         # Create background task to run the backtest
         task = asyncio.create_task(run_backtest_task(run_id, request))
         _running_tasks[run_id] = task
-        
-        return {
-            "run_id": run_id,
-            "status": "PENDING",
+    
+    return {
+        "run_id": run_id,
+        "status": "PENDING",
             "message": f"Backtest started with run_id: {run_id}"
-        }
+    }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start backtest: {str(e)}")
@@ -525,8 +527,8 @@ async def stop_backtest(run_id: str):
                 "message": "Backtest already finished",
                 "status": "FINISHED"
             }
-    
-    except Exception as e:
+            
+        except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to stop backtest: {str(e)}")
 
 

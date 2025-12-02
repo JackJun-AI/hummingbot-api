@@ -1416,11 +1416,16 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
             self.logger().error(f"❌ Failed to get price for {trading_pair}: {e}", exc_info=True)
             return None
     
-    def determine_executor_actions(self) -> List[ExecutorAction]:
+    async def determine_executor_actions(self) -> List[ExecutorAction]:
         """
-        根据 AI 决策生成 Executor Actions
+        异步版本：根据 AI 决策生成 Executor Actions
         
-        ⚠️  重要：回测引擎会在每个 tick 调用此方法，需要在这里控制决策频率
+        ✅ 优势：
+        - 不延迟决策（立即执行）
+        - 不阻塞事件循环
+        - 更准确的回测结果
+        
+        ⚠️ 要求：需要配合增强版回测引擎 (BacktestingEngineAsync)
         """
         current_time = self.market_data_provider.time()
         
@@ -1447,9 +1452,9 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
         )
         self.logger().info("=" * 80)
         
-        # 🔧 修复：同步执行 AI 决策（避免事件循环冲突）
+        # ✅ 直接异步执行 AI 决策（不延迟）
         try:
-            ai_decisions = self._execute_ai_decision_cycle_sync()
+            ai_decisions = await self._execute_ai_decision_cycle()
             
         except Exception as e:
             self.logger().error(f"❌ AI decision cycle failed: {e}", exc_info=True)
@@ -1513,39 +1518,6 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
         # 过滤掉 None（安全检查）
         return [action for action in actions if action is not None]
     
-    def _execute_ai_decision_cycle_sync(self) -> List[Dict]:
-        """
-        同步执行 AI 决策流程（避免事件循环冲突）
-        
-        🔧 修复：使用同步包装来避免 "event loop already running" 错误
-        """
-        import asyncio
-        
-        try:
-            # 方法 1：检测是否有运行中的事件循环
-            try:
-                loop = asyncio.get_running_loop()
-                # 如果有运行中的循环，使用 asyncio.create_task
-                # 但在同步函数中无法直接 await，所以使用一个特殊方法
-                self.logger().debug("Detected running event loop, using sync wrapper")
-                
-                # 创建新的事件循环在线程中运行（避免冲突）
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(
-                        asyncio.run, 
-                        self._execute_ai_decision_cycle()
-                    )
-                    return future.result(timeout=30)  # 30秒超时
-                    
-            except RuntimeError:
-                # 没有运行中的循环，直接运行
-                self.logger().debug("No running event loop, using asyncio.run()")
-                return asyncio.run(self._execute_ai_decision_cycle())
-                
-        except Exception as e:
-            self.logger().error(f"Failed to execute AI decision cycle: {e}", exc_info=True)
-            return []
     
     async def _execute_ai_decision_cycle(self) -> List[Dict]:
         """
