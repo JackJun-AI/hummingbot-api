@@ -320,8 +320,8 @@ async def start_backtest(request: BacktestStartRequest):
     
     try:
         # Generate unique run ID
-    run_id = str(uuid.uuid4())
-    
+        run_id = str(uuid.uuid4())
+        
         # Extract controller name from config
         if isinstance(request.config, str):
             # It's a YAML path, extract controller name from path
@@ -354,12 +354,12 @@ async def start_backtest(request: BacktestStartRequest):
         # Create background task to run the backtest
         task = asyncio.create_task(run_backtest_task(run_id, request))
         _running_tasks[run_id] = task
-    
-    return {
-        "run_id": run_id,
-        "status": "PENDING",
+        
+        return {
+            "run_id": run_id,
+            "status": "PENDING",
             "message": f"Backtest started with run_id: {run_id}"
-    }
+        }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start backtest: {str(e)}")
@@ -534,7 +534,7 @@ async def stop_backtest(run_id: str):
                 "status": "FINISHED"
             }
             
-        except Exception as e:
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to stop backtest: {str(e)}")
 
 
