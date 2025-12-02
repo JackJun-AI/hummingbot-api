@@ -1529,6 +1529,7 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
             
             # Step 1: 构建上下文
             self.logger().info("📊 Building trading context...")
+            self.logger().warning(f"self._backtest_run_id: {self._backtest_run_id}")
             context = await self._build_trading_context()
             self.logger().info(
                 f"   ✅ Context: {len(context['market_data'])} pairs, "
@@ -1600,6 +1601,7 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
                         f"PnL {pos['net_pnl_pct']*100:.2f}% (${pos['net_pnl_quote']:.2f})\n"
                     )
                 
+                self.logger().warning(f"log_message: {log_message}")
                 await repo.bulk_create_logs(
                     run_id=self._backtest_run_id,
                     logs=[{
