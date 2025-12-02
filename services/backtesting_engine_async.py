@@ -7,7 +7,7 @@ import inspect
 from typing import List
 from hummingbot.strategy_v2.backtesting.backtesting_engine_base import BacktestingEngineBase
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, StopExecutorAction
-from hummingbot.strategy_v2.executors.data_types import CloseType
+from hummingbot.strategy_v2.models.executors import CloseType
 
 
 class BacktestingEngineAsync(BacktestingEngineBase):
