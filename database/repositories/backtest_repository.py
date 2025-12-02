@@ -174,11 +174,29 @@ class BacktestRunRepository:
         # Extract trade information from executor_info
         config = executor_info.get("config", {})
         
+        # 🔧 Convert enum values to strings for database storage
+        side_value = config["side"]
+        if hasattr(side_value, 'name'):
+            # It's an enum (TradeType.BUY or TradeType.SELL)
+            side_str = side_value.name  # "BUY" or "SELL"
+        else:
+            # It's already a string
+            side_str = str(side_value)
+        
+        close_type_value = executor_info.get("close_type")
+        if close_type_value and hasattr(close_type_value, 'name'):
+            # It's an enum (CloseType)
+            close_type_str = close_type_value.name
+        elif isinstance(close_type_value, str):
+            close_type_str = close_type_value
+        else:
+            close_type_str = None
+        
         trade = BacktestTrade(
             backtest_run_id=backtest_run_id,
             executor_id=executor_info["id"],
             trading_pair=config["trading_pair"],
-            side=config["side"],
+            side=side_str,  # Use converted string
             entry_timestamp=int(executor_info["timestamp"]),
             exit_timestamp=int(executor_info["close_timestamp"]) if executor_info.get("close_timestamp") else None,
             entry_price=Decimal(str(config["entry_price"])),
@@ -187,7 +205,7 @@ class BacktestRunRepository:
             net_pnl_quote=Decimal(str(executor_info["net_pnl_quote"])),
             net_pnl_pct=Decimal(str(executor_info["net_pnl_pct"])),
             cum_fees_quote=Decimal(str(executor_info["cum_fees_quote"])),
-            close_type=executor_info.get("close_type") if isinstance(executor_info.get("close_type"), str) else None,
+            close_type=close_type_str,  # Use converted string
             status="CLOSED" if executor_info.get("close_timestamp") else "ACTIVE"
         )
         
