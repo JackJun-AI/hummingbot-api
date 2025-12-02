@@ -243,14 +243,14 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
     def _init_langchain_llm(self):
         """初始化 LangChain LLM"""
         try:
-            # 从环境变量获取 API key（如果配置中没有提供）
-            api_key = self.config.openrouter_api_key
-            if not api_key:
-                api_key = os.environ.get("OPENROUTER_API_KEY", "")
-                if api_key:
-                    self.logger().info("Using OPENROUTER_API_KEY from environment variable")
-                else:
-                    self.logger().warning("No OpenRouter API key found in config or environment variable")
+            # # 从环境变量获取 API key（如果配置中没有提供）
+            # api_key = self.config.openrouter_api_key
+            # if not api_key:
+            api_key = os.environ.get("OPENROUTER_API_KEY", "")
+            if api_key:
+                self.logger().warning("Using OPENROUTER_API_KEY from environment variable")
+            else:
+                self.logger().warning("No OpenRouter API key found in config or environment variable")
             
             # 使用 LangChain 的 ChatOpenAI（兼容 OpenRouter）
             self.llm = ChatOpenAI(
