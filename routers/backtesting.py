@@ -25,8 +25,8 @@ from models.backtesting import (
     BacktestLogEntry,
     BacktestTradeEntry
 )
-# 🔑 导入 contextvars（从独立模块，避免循环引用）
-from backtest_context import backtest_run_id_var, backtest_db_url_var
+# 🔑 导入 contextvars（从 utils 模块，避免循环引用）
+from utils.backtest_context import backtest_run_id_var, backtest_db_url_var
 
 router = APIRouter(tags=["Backtesting"], prefix="/backtesting")
 candles_factory = CandlesFactory()

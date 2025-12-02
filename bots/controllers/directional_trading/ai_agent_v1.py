@@ -23,10 +23,10 @@ from hummingbot.strategy_v2.executors.position_executor.data_types import Positi
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction, StopExecutorAction
 
 
-# 🔑 导入 contextvars（从独立模块，避免循环引用）
+# 🔑 导入 contextvars（从 utils 模块，避免循环引用）
 # 这样可以正确接收从 backtesting.py 传递的 run_id 和 db_url
 try:
-    from backtest_context import backtest_run_id_var, backtest_db_url_var
+    from utils.backtest_context import backtest_run_id_var, backtest_db_url_var
 except ImportError:
     # 如果导入失败（实盘环境或独立运行），设置为 None
     backtest_run_id_var = None
