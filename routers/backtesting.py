@@ -3,7 +3,6 @@ import json
 import math
 import os
 import uuid
-from contextvars import ContextVar
 from datetime import datetime
 from typing import Optional, Any, Dict
 from decimal import Decimal
@@ -26,6 +25,8 @@ from models.backtesting import (
     BacktestLogEntry,
     BacktestTradeEntry
 )
+# 🔑 导入 contextvars（从独立模块，避免循环引用）
+from backtest_context import backtest_run_id_var, backtest_db_url_var
 
 router = APIRouter(tags=["Backtesting"], prefix="/backtesting")
 candles_factory = CandlesFactory()
@@ -39,10 +40,6 @@ backtesting_engine_async = BacktestingEngineAsync()
 
 # Store running backtest tasks
 _running_tasks = {}
-
-# 🔑 使用 contextvars 实现异步任务隔离的上下文（支持多任务并发）
-backtest_run_id_var: ContextVar[Optional[str]] = ContextVar('backtest_run_id', default=None)
-backtest_db_url_var: ContextVar[Optional[str]] = ContextVar('backtest_db_url', default=None)
 
 
 def sanitize_float_value(value: Any, default: float = 0.0) -> Any:

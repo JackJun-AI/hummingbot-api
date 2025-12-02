@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import time
-from contextvars import ContextVar
 from decimal import Decimal
 from typing import Dict, List, Optional
 
@@ -24,14 +23,12 @@ from hummingbot.strategy_v2.executors.position_executor.data_types import Positi
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction, StopExecutorAction
 
 
-# 🔑 全局 contextvars（与 backtesting.py 中定义的保持一致）
-# 这些变量在每个异步任务中独立，不会互相干扰
+# 🔑 导入 contextvars（从独立模块，避免循环引用）
+# 这样可以正确接收从 backtesting.py 传递的 run_id 和 db_url
 try:
-    from contextvars import ContextVar
-    backtest_run_id_var: ContextVar[Optional[str]] = ContextVar('backtest_run_id', default=None)
-    backtest_db_url_var: ContextVar[Optional[str]] = ContextVar('backtest_db_url', default=None)
+    from backtest_context import backtest_run_id_var, backtest_db_url_var
 except ImportError:
-    # 如果导入失败（不太可能），使用 None
+    # 如果导入失败（实盘环境或独立运行），设置为 None
     backtest_run_id_var = None
     backtest_db_url_var = None
 
@@ -211,13 +208,18 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         self._decision_cycle_count = 0  # 决策轮次计数
         
         # 尝试从 contextvars 获取回测信息
+        self.logger().info(f"🔍 Checking contextvars: backtest_run_id_var={backtest_run_id_var}, backtest_db_url_var={backtest_db_url_var}")
+        
         if backtest_run_id_var is not None:
             try:
                 self._backtest_run_id = backtest_run_id_var.get()
                 self._backtest_db_url = backtest_db_url_var.get()
-            except LookupError:
+                self.logger().info(f"✅ Successfully retrieved from contextvars: run_id={self._backtest_run_id}, db_url={self._backtest_db_url}")
+            except LookupError as e:
                 # contextvars 未设置（实盘模式）
-                pass
+                self.logger().info(f"⚠️  Contextvars not set (live trading mode): {e}")
+        else:
+            self.logger().warning(f"⚠️  backtest_run_id_var is None - contextvars not imported")
         
         # 初始化 LangChain LLM
         self._init_langchain_llm()
@@ -226,6 +228,8 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         
         if self._backtest_run_id:
             self.logger().info(f"🔬 Backtest mode detected - Run ID: {self._backtest_run_id}")
+        else:
+            self.logger().warning(f"⚠️  Backtest mode NOT detected - self._backtest_run_id is None")
     
     def _init_langchain_llm(self):
         """初始化 LangChain LLM"""
